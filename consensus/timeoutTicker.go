@@ -50,7 +50,6 @@ func NewTimeoutTicker() TimeoutTicker {
 
 // OnStart implements service.Service. It starts the timeout routine.
 func (t *timeoutTicker) OnStart() error {
-
 	go t.timeoutRoutine()
 
 	return nil

@@ -23,5 +23,5 @@ func (s *NewHeightStep) enter(height int64, round int32) {
 	})
 }
 
-func (s *NewHeightStep) done(height int64, round int32)   {}
-func (s *NewHeightStep) cancel(height int64, round int32) {}
+func (s *NewHeightStep) complete(height int64, round int32) {}
+func (s *NewHeightStep) cancel(height int64, round int32)   {}

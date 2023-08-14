@@ -31,6 +31,6 @@ type RoundStepSet []RoundStep
 
 type RoundStep interface {
 	enter(height int64, round int32)
-	done(height int64, round int32)
+	complete(height int64, round int32)
 	cancel(height int64, round int32)
 }

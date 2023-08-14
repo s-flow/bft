@@ -8,7 +8,6 @@ import (
 	"time"
 
 	cfg "github.com/cometbft/cometbft/config"
-	cstypes "github.com/cometbft/cometbft/consensus/types"
 	"github.com/cometbft/cometbft/libs/log"
 	cmtmath "github.com/cometbft/cometbft/libs/math"
 	"github.com/cometbft/cometbft/libs/service"
@@ -32,9 +31,9 @@ const MaxMsgQueueSize = 1000
 
 type StateMachine struct {
 	service.BaseService
+
 	config *cfg.ConsensusConfig
 
-	vm        VoteManager
 	validator Validator
 
 	blockchain *blockchain.Blockchain
@@ -51,6 +50,8 @@ type StateMachine struct {
 	timeoutTicker TimeoutTicker
 
 	mtx sync.RWMutex
+
+	done chan struct{}
 }
 
 func NewStateMachine(
@@ -66,6 +67,7 @@ func NewStateMachine(
 		blockchain:    bc,
 		eventBus:      eb,
 		timeoutTicker: NewTimeoutTicker(),
+		done:          make(chan struct{}),
 		msgQueue:      make(chan Message, MaxMsgQueueSize),
 	}
 
@@ -90,10 +92,10 @@ func (sm *StateMachine) OnStart() error {
 func (sm *StateMachine) setupRoundStepSet() {
 	sm.roundStepSet = RoundStepSet{
 		NewNewHeightStep(sm.timeoutTicker, &sm.roundState),
-		NewProposeStep(sm.timeoutTicker, sm.config.TimeoutPropose, &sm.roundState),
-		NewPrevoteStep(sm.timeoutTicker, sm.config.TimeoutPrevote, &sm.roundState),
-		NewPrecommitStep(sm.timeoutTicker, sm.config.TimeoutPrecommit, &sm.roundState),
-		NewCommitStep(sm.timeoutTicker, sm.config.TimeoutCommit, &sm.roundState),
+		NewProposeStep(sm.timeoutTicker, sm.config.TimeoutPropose, &sm.roundState, sm.msgQueue),
+		NewPrevoteStep(sm.timeoutTicker, sm.config.TimeoutPrevote, &sm.roundState, sm.msgQueue),
+		NewPrecommitStep(sm.timeoutTicker, sm.config.TimeoutPrecommit, &sm.roundState, sm.msgQueue),
+		NewCommitStep(sm.timeoutTicker, sm.config.TimeoutCommit, &sm.roundState, sm.msgQueue),
 	}
 }
 
@@ -101,8 +103,8 @@ func (sm *StateMachine) enter(height int64, round int32, step RoundStepType) {
 	sm.roundStepSet[step].enter(height, round)
 }
 
-func (sm *StateMachine) done(height int64, round int32, step RoundStepType) {
-	sm.roundStepSet[step].done(height, round)
+func (sm *StateMachine) complete(height int64, round int32, step RoundStepType) {
+	sm.roundStepSet[step].complete(height, round)
 }
 
 func (sm *StateMachine) setTimeout(ttl time.Duration, height int64, round int32, step RoundStepType) {
@@ -120,7 +122,7 @@ func (sm *StateMachine) routine() {
 	for {
 		select {
 		case msg := <-sm.msgQueue:
-			sm.handleMsg(msg, sm.roundState)
+			sm.handleRoundEvent(msg)
 		case timeout := <-sm.timeoutTicker.Chan():
 			sm.handleTimeout(timeout, sm.roundState)
 		case <-sm.Quit():
@@ -174,7 +176,7 @@ func (sm *StateMachine) commit() {
 
 }
 
-func (sm *StateMachine) handleMsg(msg Message) {
+func (sm *StateMachine) handleRoundEvent(msg Message) {
 	ev := msg.Event
 	switch event := ev.(type) {
 	case *ProposalEvent:
@@ -182,12 +184,17 @@ func (sm *StateMachine) handleMsg(msg Message) {
 			// logging
 		}
 	case *BlockPartEvent:
-		added, err = sm.addProposalBlockPart(event, msg.PeerID)
+		added, err := sm.addProposalBlockPart(event, msg.PeerID)
 		if added {
-			sm.handleProposal()
+			sm.handleProposal(event.Height)
+		}
+		if err != nil {
+			// logging
 		}
 	case *VoteEvent:
-
+		// ..
+	case *RoundTriggerEvent:
+		// ...
 	default:
 		return
 	}
@@ -200,7 +207,7 @@ func (sm *StateMachine) handleTimeout(re RoundEvent, rs RoundState) {
 
 	switch re.Step {
 	case RoundStepNewHeight:
-		sm.done(re.Height, 0, RoundStepNewHeight)
+		sm.complete(re.Height, 0, RoundStepNewHeight)
 
 	case RoundStepPropose:
 		if err := sm.eventBus.PublishEventTimeoutPropose(sm.roundState.RoundStateEvent()); err != nil {
@@ -233,7 +240,7 @@ func (cs *StateMachine) handleProposal(height int64) {
 
 func (cs *StateMachine) newRound(height int64, round int32) {
 	logger := cs.Logger.With("height", height, "round", round)
-	if cs.roundState.Height != height || round < cs.roundState.Round || (cs.roundState.Round == round && cs.roundState.Step != cstypes.RoundStepNewHeight) {
+	if cs.roundState.Height != height || round < cs.roundState.Round || (cs.roundState.Round == round && cs.roundState.Step != RoundStepNewHeight) {
 		logger.Debug(
 			"entering new round with invalid args",
 			"current", log.NewLazySprintf("%v/%v/%v", cs.roundState.Height, cs.roundState.Round, cs.roundState.Step),
@@ -242,16 +249,16 @@ func (cs *StateMachine) newRound(height int64, round int32) {
 	}
 
 	if now := cmttime.Now(); cs.roundState.StartTime.After(now) {
-		logger.Debug("need to set a buffer and log message here for sanity", "start_time", cs.StartTime, "now", now)
+		logger.Debug("need to set a buffer and log message here for sanity", "start_time", cs.roundState.StartTime, "now", now)
 	}
 
-	logger.Debug("entering new round", "current", log.NewLazySprintf("%v/%v/%v", cs.Height, cs.Round, cs.Step))
+	logger.Debug("entering new round", "current", log.NewLazySprintf("%v/%v/%v", cs.roundState.Height, cs.roundState.Round, cs.roundState.Step))
 
 	// increment validators if necessary
 	validators := cs.roundState.Validators
 	if cs.roundState.Round < round {
 		validators = validators.Copy()
-		validators.IncrementProposerPriority(cmtmath.SafeSubInt32(round, cs.Round))
+		validators.IncrementProposerPriority(cmtmath.SafeSubInt32(round, cs.roundState.Round))
 	}
 
 	// Setup new round
@@ -274,10 +281,11 @@ func (cs *StateMachine) newRound(height int64, round int32) {
 	if err := cs.eventBus.PublishEventNewRound(cs.roundState.NewRoundEvent()); err != nil {
 		cs.Logger.Error("failed publishing new round", "err", err)
 	}
+
 	// Wait for txs to be available in the mempool
 	// before we enterPropose in round 0. If the last block changed the app hash,
 	// we may need an empty "proof" block, and enterPropose immediately.
-	waitForTxs := cs.config.WaitForTxs() && round == 0 && !cs.needProofBlock(height)
+	waitForTxs := cs.config.WaitForTxs() && round == 0 && !cs.isNewBlock(height)
 	if waitForTxs {
 		if cs.config.CreateEmptyBlocksInterval > 0 {
 			cs.setTimeout(cs.config.CreateEmptyBlocksInterval, height, round,
@@ -288,9 +296,7 @@ func (cs *StateMachine) newRound(height int64, round int32) {
 	}
 }
 
-// needProofBlock returns true on the first height (so the genesis app hash is signed right away)
-// and where the last block (height-1) caused the app hash to change
-func (sm *StateMachine) needProofBlock(height int64) bool {
+func (sm *StateMachine) isNewBlock(height int64) bool {
 	if height == sm.state.InitialHeight {
 		return true
 	}
@@ -298,7 +304,7 @@ func (sm *StateMachine) needProofBlock(height int64) bool {
 	lastBlockMeta := sm.blockchain.LoadBlockMeta(height - 1)
 	if lastBlockMeta == nil {
 		// See https://github.com/cometbft/cometbft/issues/370
-		sm.Logger.Info("short-circuited needProofBlock", "height", height, "InitialHeight", cs.state.InitialHeight)
+		sm.Logger.Info("short-circuited isNewBlock", "height", height, "InitialHeight", sm.state.InitialHeight)
 		return true
 	}
 

@@ -104,6 +104,21 @@ func (m *BlockPartEvent) String() string {
 }
 
 // VoteMessage is sent when voting for a proposal (or lack thereof).
+type RoundTriggerEvent struct {
+	Event RoundEvent
+}
+
+// ValidateBasic checks whether the vote within the message is well-formed.
+func (m *RoundTriggerEvent) ValidateBasic() error {
+	// return m.Event.ValidateBasic()
+}
+
+// String returns a string representation.
+func (m *RoundTriggerEvent) String() string {
+	return fmt.Sprintf("[RoundTriggerEvent %v]", m.Event)
+}
+
+// VoteMessage is sent when voting for a proposal (or lack thereof).
 type VoteEvent struct {
 	Vote *types.Vote
 }

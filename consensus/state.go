@@ -9,7 +9,7 @@ import (
 
 type State struct {
 	state.State
-	mtx sync.RWMutex
+	mtx sync.RWMutex `json:"-"`
 }
 
 func NewState(state state.State) *State {

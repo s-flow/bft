@@ -50,7 +50,7 @@ type RoundState struct {
 	LastValidators            *types.ValidatorSet    `json:"last_validators"`
 	TriggeredTimeoutPrecommit bool                   `json:"triggered_timeout_precommit"`
 
-	mtx sync.RWMutex
+	mtx sync.RWMutex `json:"-"`
 }
 
 // GetLastHeight returns the last height committed.
